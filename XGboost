@@ -1,0 +1,212 @@
+###code web address
+https://github.com/Kulbear/New-York-City-Taxi-Trip-Duration/blob/master/xgboost.ipynb
+
+### import libraries
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.decomposition import PCA
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+%matplotlib inline
+seed_set = 311
+np.random.seed(seed_set)
+import seaborn as sns
+import matplotlib.pyplot as plt
+plt.rcParams['figure.figsize'] = [16, 10]
+from IPython.core.interactiveshell import InteractiveShell
+InteractiveShell.ast_node_interactivity = "all"
+
+###deal with location data
+AVG_EARTH_RADIUS = 6371 # in km
+def haversine(point1, point2, miles=False):
+    # Unpack latitude/longitude
+    lat1, lng1 = point1
+    lat2, lng2 = point2
+
+    # Convert all latitudes/longitudes from decimal degrees to radians
+    lat1, lng1, lat2, lng2 = map(np.radians, (lat1, lng1, lat2, lng2))
+    
+    # Calculate haversine
+    lat, lng= lat2 - lat1, lng2 - lng1
+    d = np.sin(lat * 0.5) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(lng * 0.5) ** 2
+    h = 2 * AVG_EARTH_RADIUS * np.arcsin(np.sqrt(d))
+    return h * 0.621371 if miles else h # in m/k
+    
+ def dummy_manhattan_distance(point1, point2):
+    lat1, lng1 = point1
+    lat2, lng2 = point2
+    a = haversine((lat1, lng1), (lat1, lng2))
+    b = haversine((lat1, lng1), (lat2, lng1))
+    return haversine((lat1, lng1), (lat1, lng2)) + haversine((lat1, lng1), (lat2, lng1))
+  
+  def bearing_array(lat1, lng1, lat2, lng2):
+    AVG_EARTH_RADIUS = 6371  # in km
+    lng_delta_rad = np.radians(lng2 - lng1)
+    (lat1, lng1, lat2, lng2) = map(np.radians, (lat1, lng1, lat2, lng2))
+    y = np.sin(lng_delta_rad) * np.cos(lat2)
+    x = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(lng_delta_rad)
+    return np.degrees(np.arctan2(y, x))
+    
+###load data
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+###build features
+train['distance_haversine'] = haversine((train['pickup_latitude'].values, train['pickup_longitude'].values),(train['dropoff_latitude'].values, train['dropoff_longitude'].values))
+train['distance_dummy_manhattan'] = dummy_manhattan_distance((train['pickup_latitude'].values, train['pickup_longitude'].values),(train['dropoff_latitude'].values, train['dropoff_longitude'].values))
+train['direction'] = bearing_array(train['pickup_latitude'].values, train['pickup_longitude'].values, train['dropoff_latitude'].values, train['dropoff_longitude'].values)
+train['center_latitude'] = (train['pickup_latitude'].values + train['dropoff_latitude'].values) / 2
+train['center_longitude'] = (train['pickup_longitude'].values + train['dropoff_longitude'].values) / 2
+
+test['distance_haversine'] = haversine((test['pickup_latitude'].values, test['pickup_longitude'].values),(test['dropoff_latitude'].values, test['dropoff_longitude'].values))
+test['distance_dummy_manhattan'] = dummy_manhattan_distance((test['pickup_latitude'].values, test['pickup_longitude'].values),(test['dropoff_latitude'].values, test['dropoff_longitude'].values))
+test['direction'] = bearing_array(test['pickup_latitude'].values, test['pickup_longitude'].values, test['dropoff_latitude'].values, test['dropoff_longitude'].values)
+test['center_latitude'] = (test['pickup_latitude'].values + test['dropoff_latitude'].values) / 2
+test['center_longitude'] = (test['pickup_longitude'].values + test['dropoff_longitude'].values) / 2
+
+###convert time to format
+
+train[['pickup_datetime''pickup ] = pd.to_datetime(train['pickup_datetime'])
+test['pickup_datetime'] = pd.to_datetime(train['pickup_datetime'])
+train['pickup_date'] = train['pickup_datetime'].dt.date
+train['pickup_weekday'] = train['pickup_datetime'].dt.weekday
+train['pickup_day'] = train['pickup_datetime'].dt.day
+train['pickup_month'] = train['pickup_datetime'].dt.month
+train['pickup_hour'] = train['pickup_datetime'].dt.hour
+train['pickup_minute'] = train['pickup_datetime'].dt.minute
+train['pickup_am'] = train['pickup_hour'] < 12
+
+test['pickup_date'] = test['pickup_datetime'].dt.date
+test['pickup_weekday'] = test['pickup_datetime'].dt.weekday
+test['pickup_day'] = test['pickup_datetime'].dt.day
+test['pickup_month'] = test['pickup_datetime'].dt.month
+test['pickup_hour'] = test['pickup_datetime'].dt.hour
+test['pickup_minute'] = test['pickup_datetime'].dt.minute
+test['pickup_am'] = test['pickup_hour'] < 12
+
+# These time periods are based on visuls below
+train['night_trip'] = [True if x < 7 else False for x in train['pickup_hour']]
+train['rush_hour'] = [True if 9 < x < 20 else False for x in train['pickup_hour']]
+train['weekday'] = [True if x < 5 else False for x in train['pickup_weekday']]
+test['night_trip'] = [True if x < 7 else False for x in test['pickup_hour']]
+test['rush_hour'] = [True if 9 < x < 20 else False for x in test['pickup_hour']]
+test['weekday'] = [True if x < 5 else False for x in test['pickup_weekday']]
+
+#convert target variables
+train['log_trip_duration'] = np.log(train['trip_duration'].values + 1)
+
+###Visualization
+#duration histogram
+plt.hist(train['log_trip_duration'].values, bins=100)
+plt.xlabel('log(trip_duration)')
+plt.ylabel('number of train records')
+plt.show()
+
+###period and area overlap
+#count number of records from train and test data
+plt.plot(train.groupby('pickup_date').count()[['id']], 'o-', label='train')
+plt.plot(test.groupby('pickup_date').count()[['id']], 'o-', label='test')
+plt.title('Train and test period complete overlap.')
+plt.legend(loc=0)
+plt.ylabel('number of records')
+plt.show()
+
+#count number of records from different areas
+N = 100000
+fig, ax = plt.subplots(ncols=2, sharex=True, sharey=True)
+ax[0].plot(train['pickup_longitude'].values[:N],train['pickup_latitude'].values[:N],'b.',label='train',alpha=0.1)
+ax[1].plot(test['pickup_longitude'].values[:N],test['pickup_latitude'].values[:N],'g.',label='test',alpha=0.1)
+fig.suptitle('Train and test area complete overlap.')
+ax[0].legend(loc=0)
+ax[0].set_ylabel('latitude')
+ax[0].set_xlabel('longitude')
+ax[1].set_xlabel('longitude')
+ax[1].legend(loc=0)
+plt.ylim([40.5, 41])
+plt.xlim([-74.5, -73.5])
+plt.show()
+
+full = pd.concat([train, test])
+coords = np.vstack((full[['pickup_latitude', 'pickup_longitude']], full[['dropoff_latitude', 'dropoff_longitude']]))
+coords.shape
+
+###reduce demensionality
+pca = PCA().fit(coords)
+train['pickup_pca0'] = pca.transform(train[['pickup_latitude', 'pickup_longitude']])[:, 0]
+train['pickup_pca1'] = pca.transform(train[['pickup_latitude', 'pickup_longitude']])[:, 1]
+train['dropoff_pca0'] = pca.transform(train[['dropoff_latitude', 'dropoff_longitude']])[:, 0]
+train['dropoff_pca1'] = pca.transform(train[['dropoff_latitude', 'dropoff_longitude']])[:, 1]
+train['pca_manhattan'] = np.abs(train['dropoff_pca1'] - train['pickup_pca1']) + np.abs(train['dropoff_pca0'] - train['pickup_pca0'])
+
+test['pickup_pca0'] = pca.transform(test[['pickup_latitude', 'pickup_longitude']])[:, 0]
+test['pickup_pca1'] = pca.transform(test[['pickup_latitude', 'pickup_longitude']])[:, 1]
+test['dropoff_pca0'] = pca.transform(test[['dropoff_latitude', 'dropoff_longitude']])[:, 0]
+test['dropoff_pca1'] = pca.transform(test[['dropoff_latitude', 'dropoff_longitude']])[:, 1]
+test['pca_manhattan'] = np.abs(test['dropoff_pca1'] - test['pickup_pca1']) + np.abs(test['dropoff_pca0'] - test['pickup_pca0'])
+
+#remove useless columns
+DO_NOT_USE_FOR_TRAINING = ['id', 'pickup_datetime', 'dropoff_datetime', 'pickup_longitude', 'pickup_latitude',
+    'dropoff_longitude','dropoff_latitude', 'trip_duration', 'pickup_date', 'log_trip_duration]
+    
+new_df = train.drop([col for col in DO_NOT_USE_FOR_TRAINING if col in train], axis=1)
+new_df_test = test.drop([col for col in DO_NOT_USE_FOR_TRAINING if col in test], axis=1)
+
+new_df['store_and_fwd_flag'] = 1 *  new_df['store_and_fwd_flag'] == True
+new_df_test['store_and_fwd_flag'] = 1 *  new_df['store_and_fwd_flag'] == True
+new_df.shape, new_df_test.shape
+new_df.columns == new_df_test.columns
+
+###generate training and testing data
+# Use log to handle outliers
+y = np.log(train['trip_duration'].values)
+train_attr = np.array(new_df)
+train_attr.shape
+train_x, val_x, train_y, val_y = train_test_split(train_attr, y, test_size=0.2)
+
+###XGBOOST ALGORITHM
+dtrain = xgb.DMatrix(train_x, label=train_y)
+dvalid = xgb.DMatrix(val_x, label=val_y)
+dtest = xgb.DMatrix(new_df_test.values)
+watchlist = [(dtrain, 'train'), (dvalid, 'valid')]
+
+xgb_pars = {'min_child_weight': 100, 'eta': 0.1, 'colsample_bytree': 0.7, 'max_depth': 15,
+            'subsample': 0.8, 'lambda': 1., 'nthread': -1, 'booster' : 'gbtree', 'silent': 1,
+            'eval_metric': 'rmse', 'objective': 'reg:linear'}
+model_xgb = xgb.train(xgb_pars, dtrain, 500, watchlist, early_stopping_rounds=50,maximize=False, verbose_eval=20)
+print('XGB Modeling RMSLE %.5f' % model_xgb.best_score)
+def rmse(y_true, y_pred):
+    return np.sqrt(np.mean(np.square(y_pred - y_true), axis=-1))
+    
+###run decision tree and random forest
+TREE_REGRESSORS = [DecisionTreeRegressor(), RandomForestRegressor()]
+models = []
+for regressor in TREE_REGRESSORS:
+    clf = regressor
+    clf = clf.fit(train_x, train_y)
+    models.append(clf)
+
+for model in models:
+    # train_y is logged so rmse computes rmsle
+    train_rmsle = rmse(train_y, model.predict(train_x))
+    val_rmsle = rmse(val_y, model.predict(val_x))
+    print('With model: {}\nTrain RMSLE: {}\nVal. RMSLE: {}'.format(model, train_rmsle, val_rmsle))
+
+###predictiing test set
+test_attr = np.array(new_df_test)
+model_rt, model_rf = models
+
+pred_rtpred_rt  ==  model_rtmodel_rt.predict(test_attr)
+pred_rt = np.exp(pred_rt)
+pred_rt
+submission = pd.concat([test['id'], pd.DataFrame(pred_rt, columns=['trip_duration'])], axis=1)
+submission.to_csv('submission-rt.csv',index=False)
+
+pred_xgb = model_xgb.predict(dtest)
+pred_xgb = np.exp(pred_xgb)
+print('Test shape OK.') if test.shape[0] == pred_xgb.shape[0] else print('Oops')
+pred_xgb
+
+submission = pd.concat([test['id'], pd.DataFrame(pred_xgb, columns=['trip_duration'])], axis=1)
+submission.to_csv('submission-xgb.csv',index=False)
